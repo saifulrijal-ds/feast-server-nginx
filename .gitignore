@@ -1,0 +1,39 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# TLS certificates — server.key is a private key, never commit it
+certs/
+
+# Claude Code local settings
+.claude/
+
+# Environment variables
+.env
+.env.local
+*.local
+
+# Docker volumes (generated data)
+postgres_data/
+
+# Feature store data files
+feature_repo/data/
+feature_repo/registry/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

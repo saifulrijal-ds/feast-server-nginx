@@ -1,0 +1,19 @@
+# ── SERVER-SIDE feature_store.yaml ───────────────────────────
+# Used INSIDE Docker containers (direct DB access on Docker network)
+# NOT the file the DS uses locally.
+
+project: bfi_credit_features
+provider: local
+entity_key_serialization_version: 2
+
+registry:
+  registry_type: sql
+  path: postgresql+psycopg2://feast:feast123@postgres:5432/feast
+  cache_ttl_seconds: 60
+
+offline_store:
+  type: file
+
+online_store:
+  type: redis
+  connection_string: "redis:6379"

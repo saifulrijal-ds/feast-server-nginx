@@ -1,0 +1,38 @@
+# ── CLIENT feature_store.yaml  (nginx / single port 443) ──────
+# Use when: nginx reverse proxy is running on the server (ports 80/443).
+# nginx terminates TLS; all Feast services are reached through port 443.
+#
+# HOW TO USE:
+#   export FEAST_SERVER_HOST=ec2-xx-xx-xx-xx.compute-1.amazonaws.com
+#   export FEAST_CERT_PATH=/home/ds/.feast/ca.crt
+#   envsubst < feature_store_nginx.yaml > feature_store.yaml
+#   python test_client.py
+
+project: bfi_credit_features
+entity_key_serialization_version: 3
+
+# ── Registry (gRPC + TLS via nginx :443) ──────────────────────
+# https:// enables TLS; port 443 is the default for https://.
+# nginx routes /feast.registry.* → feast-registry:6570 internally.
+registry:
+  registry_type: remote
+  path: ${FEAST_SERVER_HOST}:443
+  cert: ${FEAST_CERT_PATH}
+
+# ── Offline store (Arrow Flight + TLS via nginx :443) ──────────
+# scheme: https — Feast maps this to grpc+tls for Arrow Flight internally.
+# Port 443 replaces the native Arrow Flight port 8815.
+# nginx routes /arrow.flight.protocol.* → feast-offline:8815 internally.
+offline_store:
+  type: remote
+  host: ${FEAST_SERVER_HOST}
+  port: 443
+  scheme: https
+  cert: ${FEAST_CERT_PATH}
+
+# ── Online store (HTTPS via nginx :443) ───────────────────────
+# nginx routes /feast.serving.* → feast-online:6566 internally.
+online_store:
+  type: remote
+  path: https://${FEAST_SERVER_HOST}:443
+  cert: ${FEAST_CERT_PATH}

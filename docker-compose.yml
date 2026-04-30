@@ -1,0 +1,113 @@
+# ═══════════════════════════════════════════════════════════════
+#  Feast 0.62.0  —  nginx-proxied PoC (Docker on server)
+#
+#  nginx handles ALL TLS on ports 80/443.
+#  Feast services run plain (FEAST_TLS=false) inside Docker.
+#
+#  Before running:
+#    ./scripts/gen_certs.sh your.server.hostname
+#    FEAST_HOSTNAME=your.server.hostname docker compose up --build
+# ═══════════════════════════════════════════════════════════════
+
+x-feast-base: &feast-base
+  build:
+    context: .
+    dockerfile: Dockerfile.feast
+  environment:
+    FEAST_USAGE: "False"
+  volumes:
+    - ./feature_repo:/app/feature_repo
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: feast-postgres
+    environment:
+      POSTGRES_DB: feast
+      POSTGRES_USER: feast
+      POSTGRES_PASSWORD: feast123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feast -d feast"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: feast-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  feast-init:
+    <<: *feast-base
+    container_name: feast-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: bash /app/feature_repo/init.sh
+
+  feast-registry:
+    <<: *feast-base
+    container_name: feast-registry
+    depends_on:
+      feast-init:
+        condition: service_completed_successfully
+    command: bash /app/feature_repo/start_registry.sh
+    restart: unless-stopped
+
+  feast-offline:
+    <<: *feast-base
+    container_name: feast-offline
+    depends_on:
+      feast-init:
+        condition: service_completed_successfully
+    command: bash /app/feature_repo/start_offline.sh
+    restart: unless-stopped
+
+  feast-online:
+    <<: *feast-base
+    container_name: feast-online
+    depends_on:
+      feast-init:
+        condition: service_completed_successfully
+    command: bash /app/feature_repo/start_online.sh
+    restart: unless-stopped
+
+  feast-ui:
+    <<: *feast-base
+    container_name: feast-ui
+    depends_on:
+      feast-init:
+        condition: service_completed_successfully
+    command: >
+      feast -c /app/feature_repo ui --host 0.0.0.0 --port 8888
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: feast-nginx
+    depends_on:
+      - feast-registry
+      - feast-offline
+      - feast-online
+      - feast-ui
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

@@ -1,0 +1,46 @@
+# ── Feast 0.62.0 ──────
+FROM python:3.11-slim
+
+# Prevent Python from writing pyc files and keep stdout unbuffered
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Only install curl (useful for Docker healthchecks). 
+# gcc, g++, and libpq-dev are removed because psycopg2-binary doesn't need them.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip first (good practice), then install dependencies
+# We explicitly add psycopg2-binary to guarantee no compilation is attempted
+RUN pip install --no-cache-dir --upgrade pip && \
+    # Add 'remote' to the feast extras to get gRPC support
+    pip install --no-cache-dir \
+    "feast[redis,postgres,remote]==0.62.0" \
+    "grpcio" \
+    "grpcio-status" \
+    "grpcio-tools" \
+    "grpcio-reflection" \
+    "grpcio-health-checking" \
+    "psycopg2-binary" \
+    "pyarrow>=14.0" \
+    "pandas>=2.0"
+
+# Create a non-root user for security and switch to it
+RUN useradd -m -s /bin/bash feastuser && \
+    chown -R feastuser:feastuser /app && \
+    # Feast UI needs write access to this directory to store projects-list.json
+    mkdir -p /usr/local/lib/python3.11/site-packages/feast/ui/build/ && \
+    chown -R feastuser:feastuser /usr/local/lib/python3.11/site-packages/feast/ui/build/
+
+USER feastuser
+
+# Copy your feature repo code into the container
+# (Doing this AFTER pip install means Docker caches your dependencies, 
+# making rebuilds lightning fast when you only change Python code)
+COPY --chown=feastuser:feastuser . .
+
+# Default command (adjust based on how you start your init process)
+CMD ["feast", "version"]
