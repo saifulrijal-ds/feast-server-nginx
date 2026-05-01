@@ -1,0 +1,23 @@
+[project]
+name = "feast-poc-v3"
+version = "0.1.0"
+description = "Feast 0.62.0 PoC with nginx TLS reverse proxy for Multifinance Company credit risk modeling"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastapi",
+    "feast[postgres,redis]",
+    "grpcio",
+    "grpcio-health-checking",
+    "grpcio-reflection",
+    "grpcio-status",
+    "grpcio-tools",
+    "httpx",
+    "mlflow",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "scikit-learn",
+    "setuptools",
+    "uvicorn[standard]",
+]

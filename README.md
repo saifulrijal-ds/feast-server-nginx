@@ -42,7 +42,7 @@ feast-poc-v3/
 │   └── nginx.conf                  # nginx routing config
 ├── feature_repo/
 │   ├── feature_store.yaml          # server-side store config
-│   ├── feature_definitions.py      # BFI Finance credit features
+│   ├── feature_definitions.py      # Multifinance Company credit features
 │   ├── generate_data.py            # synthetic Parquet data
 │   ├── init.sh                     # generate → apply → materialize
 │   ├── start_registry.sh
@@ -52,13 +52,25 @@ feast-poc-v3/
 ├── scripts/
 │   ├── gen_certs.sh                # self-signed TLS cert generator
 │   └── diagnose.sh                 # connectivity checker
+├── pyproject.toml                  # Python dependencies (use with uv)
+├── uv.lock                         # uv dependency lock file
+├── CLAUDE.md                       # Development guide for Claude Code
+├── DATA_SUMMARY.md                 # Synthetic dataset schema
 └── client/
-    ├── feature_store_nginx.yaml    # template for nginx mode
-    ├── feature_store_plain.yaml    # template for plain/direct mode
-    ├── feature_store_tls.yaml      # template for direct TLS mode
-    ├── setup_client.sh             # one-command client setup
+    ├── feature_store.yaml          # active client config (nginx mode)
+    ├── feature_store_nginx.yaml    # template reference
     └── test_client.py              # 4-step end-to-end test
 ```
+
+---
+
+## Project Details
+
+**Project Name:** `credit_risk_modeling`  
+**Domain:** Multifinance Company Credit Risk modeling  
+**Features:** 2 feature views, 13 total features for credit risk assessment  
+**Entity:** customer_id (2,000 synthetic customers)  
+**Materialization:** Parquet → Redis (90-day TTL)
 
 ---
 
@@ -173,11 +185,15 @@ FEAST_HOSTNAME=ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com \
 
 ## Part 2 — Client Setup (Data Scientist machine)
 
-### Step 1 — Install the Feast SDK
+### Step 1 — Install dependencies with uv
+
+Install [uv](https://docs.astral.sh/uv/) for Python dependency management, then:
 
 ```bash
-pip install "feast[redis,postgres]==0.62.0" pyarrow pandas
+uv sync                    # Install all dependencies from pyproject.toml
 ```
+
+This installs Feast SDK + all required packages (pandas, pyarrow, mlflow, FastAPI, etc.).
 
 ---
 
@@ -202,53 +218,36 @@ Copy this into the working directory of your project (same folder as
 `test_client.py`):
 
 ```yaml
-project: bfi_credit_features
+project: credit_risk_modeling
 entity_key_serialization_version: 3
 
 registry:
   registry_type: remote
-  path: ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com:443
-  cert: /home/ubuntu/.feast/ca.crt
+  path: your.hostname.com:443
+  cert: ~/.feast/ca.crt
 
 offline_store:
   type: remote
-  host: ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com
+  host: your.hostname.com
   port: 443
   scheme: https
-  cert: /home/ubuntu/.feast/ca.crt
+  cert: ~/.feast/ca.crt
 
 online_store:
   type: remote
-  path: https://ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com:443
-  cert: /home/ubuntu/.feast/ca.crt
+  path: https://your.hostname.com:443
+  cert: ~/.feast/ca.crt
 ```
 
-Replace the hostname with your actual public DNS from Part 1 Step 2.
+Replace `your.hostname.com` with your EC2 public hostname from Part 1 Step 2.  
+The `feature_store.yaml` file is already configured in the `client/` directory.
 
 ---
 
-### Step 4 — (Alternative) Use the setup script
-
-If you have access to the `client/` directory from this repo:
+### Step 4 — Run the test
 
 ```bash
-cd client/
-
-./setup_client.sh \
-  ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com \
-  nginx \
-  ~/.feast/ca.crt
-```
-
-This runs `envsubst` on `feature_store_nginx.yaml` and writes `feature_store.yaml`
-automatically.
-
----
-
-### Step 5 — Run the test
-
-```bash
-python test_client.py
+uv run python client/test_client.py
 ```
 
 Expected output:

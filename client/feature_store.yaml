@@ -1,0 +1,22 @@
+project: credit_risk_modeling
+entity_key_serialization_version: 3
+
+# ── Registry (gRPC + TLS via nginx :443) ──────────────────────
+registry:
+  registry_type: remote
+  path: ec2-16-78-90-216.ap-southeast-3.compute.amazonaws.com:443
+  cert: /home/ubuntu/feast-poc-v3/certs/ca.crt
+
+# ── Offline store (Arrow Flight + TLS via nginx :443) ──────────
+offline_store:
+  type: remote
+  host: ec2-16-78-90-216.ap-southeast-3.compute.amazonaws.com
+  port: 443
+  scheme: https
+  cert: /home/ubuntu/feast-poc-v3/certs/ca.crt
+
+# ── Online store (HTTPS via nginx :443) ───────────────────────
+online_store:
+  type: remote
+  path: https://ec2-16-78-90-216.ap-southeast-3.compute.amazonaws.com:443
+  cert: /home/ubuntu/feast-poc-v3/certs/ca.crt

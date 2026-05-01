@@ -35,7 +35,7 @@ openssl req -x509 -nodes -newkey rsa:4096 \
   -keyout "$CERTS_DIR/server.key" \
   -out    "$CERTS_DIR/server.crt" \
   -days 365 \
-  -subj "/CN=${HOSTNAME}/O=BFI Finance/OU=Data Innovation" \
+  -subj "/CN=${HOSTNAME}/O=Multifinance Company/OU=Data Innovation" \
   -addext "subjectAltName=${SAN_LINE}" \
   -addext "basicConstraints=CA:TRUE" \
   2>/dev/null

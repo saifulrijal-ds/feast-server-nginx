@@ -1,5 +1,5 @@
 """
-Generate enhanced BFI Finance credit data with realistic correlations.
+Generate enhanced Multifinance Company credit data with realistic correlations.
 Uses latent credit_quality variable to create inter-feature dependencies.
 """
 import pandas as pd

@@ -1,4 +1,4 @@
-# ── BFI Finance Credit Risk Feature Definitions ──────────────
+# ── Multifinance Company Credit Risk Feature Definitions ──────────────
 # Two FeatureViews: customer_credit_stats, customer_behavior_stats
 
 from datetime import timedelta
@@ -7,7 +7,7 @@ from feast.types import Float32, Int64
 
 customer = Entity(
     name="customer_id",
-    description="BFI Finance customer ID",
+    description="Multifinance Company customer ID",
 )
 
 credit_source = FileSource(

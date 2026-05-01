@@ -1,4 +1,4 @@
-# BFI Finance Credit Risk Dataset Summary
+# Multifinance Company Credit Risk Dataset Summary
 
 ## Dataset Overview
 
@@ -20,7 +20,7 @@
 
 ### Customer Credit Stats (`customer_credit_stats.parquet`)
 
-**Entity:** `customer_id` (Int64) — BFI Finance customer identifier
+**Entity:** `customer_id` (Int64) — Multifinance Company customer identifier
 
 **Timestamp:** `event_timestamp` (datetime64[us, UTC]) — observation timestamp
 

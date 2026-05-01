@@ -8,7 +8,7 @@
 #   envsubst < feature_store_nginx.yaml > feature_store.yaml
 #   python test_client.py
 
-project: bfi_credit_features
+project: credit_risk_modeling
 entity_key_serialization_version: 3
 
 # ── Registry (gRPC + TLS via nginx :443) ──────────────────────
