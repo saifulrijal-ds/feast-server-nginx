@@ -46,6 +46,25 @@ services:
       retries: 10
     restart: unless-stopped
 
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    container_name: feast-keycloak
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME_STRICT: "false"
+    command: start-dev --import-realm
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/feast-realm/.well-known/openid-configuration > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
   feast-init:
     <<: *feast-base
     container_name: feast-init
@@ -62,6 +81,8 @@ services:
     depends_on:
       feast-init:
         condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
     command: bash /app/feature_repo/start_registry.sh
     restart: unless-stopped
 
@@ -71,6 +92,8 @@ services:
     depends_on:
       feast-init:
         condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
     command: bash /app/feature_repo/start_offline.sh
     restart: unless-stopped
 
@@ -80,6 +103,8 @@ services:
     depends_on:
       feast-init:
         condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
     command: bash /app/feature_repo/start_online.sh
     restart: unless-stopped
 

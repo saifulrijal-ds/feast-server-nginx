@@ -1,0 +1,40 @@
+# ── CLIENT feature_store.yaml — alice (admin) ──────────────────
+# alice has full access to all feature views.
+#
+# HOW TO USE:
+#   export FEAST_SERVER_HOST=ec2-xx-xx-xx-xx.compute-1.amazonaws.com
+#   export FEAST_CERT_PATH=/home/ds/.feast/ca.crt
+#   envsubst < feature_store_alice.yaml > feature_store.yaml
+#   python test_rbac.py
+#
+# NOTE: verify_ssl: false disables TLS cert check for OIDC calls only.
+# For production, install ca.crt into the system trust store instead.
+
+project: credit_risk_modeling
+entity_key_serialization_version: 3
+
+registry:
+  registry_type: remote
+  path: ${FEAST_SERVER_HOST}:443
+  cert: ${FEAST_CERT_PATH}
+
+offline_store:
+  type: remote
+  host: ${FEAST_SERVER_HOST}
+  port: 443
+  scheme: https
+  cert: ${FEAST_CERT_PATH}
+
+online_store:
+  type: remote
+  path: https://${FEAST_SERVER_HOST}:443
+  cert: ${FEAST_CERT_PATH}
+
+auth:
+  type: oidc
+  client_id: feast-app
+  client_secret: feast-secret
+  username: alice
+  password: password123
+  auth_discovery_url: https://${FEAST_SERVER_HOST}/realms/feast-realm/.well-known/openid-configuration
+  verify_ssl: false

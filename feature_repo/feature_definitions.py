@@ -3,6 +3,9 @@
 
 from datetime import timedelta
 from feast import Entity, FeatureView, Field, FileSource
+from feast.permissions.action import AuthzedAction, READ
+from feast.permissions.permission import Permission
+from feast.permissions.policy import RoleBasedPolicy
 from feast.types import Float32, Int64
 
 customer = Entity(
@@ -53,4 +56,39 @@ customer_behavior_fv = FeatureView(
     ],
     source=behavior_source,
     tags={"team": "credit_risk", "model": "collection_strategy"},
+)
+
+# ── Permissions ───────────────────────────────────────────────
+# Roles (defined in Keycloak feast-app client):
+#   admin             → alice  — full access to all feature views
+#   collection_officer → bob   — read-only on customer_behavior_stats only
+#
+# AuthzedAction options: CREATE, DESCRIBE, UPDATE, DELETE,
+#   READ_ONLINE, READ_OFFLINE, WRITE_ONLINE, WRITE_OFFLINE
+# READ = [AuthzedAction.READ_ONLINE, AuthzedAction.READ_OFFLINE]
+#
+admin_permission = Permission(
+    name="admin-full-access",
+    policy=RoleBasedPolicy(roles=["admin"]),
+    types=[FeatureView],
+    actions=[
+        AuthzedAction.CREATE,
+        AuthzedAction.DESCRIBE,
+        AuthzedAction.UPDATE,
+        AuthzedAction.DELETE,
+        *READ,
+        AuthzedAction.WRITE_ONLINE,
+        AuthzedAction.WRITE_OFFLINE,
+    ],
+)
+
+co_permission = Permission(
+    name="co-behavior-read",
+    policy=RoleBasedPolicy(roles=["collection_officer"]),
+    types=[FeatureView],
+    name_patterns=["customer_behavior_stats"],
+    actions=[
+        AuthzedAction.DESCRIBE,
+        *READ,
+    ],
 )

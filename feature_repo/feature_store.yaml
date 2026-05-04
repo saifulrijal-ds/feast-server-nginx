@@ -17,3 +17,11 @@ offline_store:
 online_store:
   type: redis
   connection_string: "redis:6379"
+
+# ── Auth: OIDC via Keycloak (server-side token validation) ───
+# Feast servers validate incoming JWT tokens using Keycloak's JWKS.
+# Uses internal Docker hostname — no TLS needed inside the network.
+auth:
+  type: oidc
+  client_id: feast-app
+  auth_discovery_url: http://keycloak:8080/realms/feast-realm/.well-known/openid-configuration

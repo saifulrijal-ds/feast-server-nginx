@@ -1,8 +1,9 @@
-# Feast 0.62.0 — Remote Access via nginx (Docker on EC2)
+# Feast 0.62.0 — Remote Access via nginx + Keycloak RBAC (Docker on EC2)
 
 All Feast services run inside Docker. A single **nginx** container is the only
 public entry point on ports **80** and **443**. No Feast-specific ports are
-exposed to the internet.
+exposed to the internet. Requests are authenticated via **Keycloak OIDC** with
+role-based access control enforced by Feast's AuthZ Manager.
 
 ---
 
@@ -17,6 +18,7 @@ nginx :443 (TLS termination)
     ├── /feast.serving.*           → feast-online:6566    (gRPC)
     ├── /arrow.flight.protocol.*   → feast-offline:8815   (Arrow Flight gRPC)
     ├── /get-online-features       → feast-online:6566    (REST)
+    ├── /realms/*                  → keycloak:8080        (OIDC token endpoint)
     └── /                         → feast-ui:8888         (HTTP)
 
 nginx :80  → 301 redirect to :443
@@ -26,6 +28,7 @@ Internal Docker network only (not exposed):
     feast-offline:8815
     feast-online:6566
     feast-ui:8888
+    keycloak:8080
     postgres:5432
     redis:6379
 ```
@@ -39,10 +42,12 @@ feast-poc-v3/
 ├── docker-compose.yml
 ├── Dockerfile.feast
 ├── nginx/
-│   └── nginx.conf                  # nginx routing config
+│   └── nginx.conf                  # nginx routing + Keycloak proxy
+├── keycloak/
+│   └── realm-export.json           # auto-imported realm: users, roles, client
 ├── feature_repo/
-│   ├── feature_store.yaml          # server-side store config
-│   ├── feature_definitions.py      # Multifinance Company credit features
+│   ├── feature_store.yaml          # server-side store + OIDC auth config
+│   ├── feature_definitions.py      # Entity, FeatureViews, Permission objects
 │   ├── generate_data.py            # synthetic Parquet data
 │   ├── init.sh                     # generate → apply → materialize
 │   ├── start_registry.sh
@@ -57,9 +62,12 @@ feast-poc-v3/
 ├── CLAUDE.md                       # Development guide for Claude Code
 ├── DATA_SUMMARY.md                 # Synthetic dataset schema
 └── client/
-    ├── feature_store.yaml          # active client config (nginx mode)
-    ├── feature_store_nginx.yaml    # template reference
-    └── test_client.py              # 4-step end-to-end test
+    ├── feature_store.yaml          # active client config (set by envsubst)
+    ├── feature_store_nginx.yaml    # template — no auth
+    ├── feature_store_alice.yaml    # template — alice (admin), use envsubst
+    ├── feature_store_bob.yaml      # template — bob (collection_officer), use envsubst
+    ├── test_client.py              # 4-step end-to-end test (no auth)
+    └── test_rbac.py                # RBAC test: alice vs bob access
 ```
 
 ---
@@ -138,13 +146,15 @@ FEAST_HOSTNAME=ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com \
 Container startup order:
 
 ```
-postgres + redis  →  feast-init (generate → apply → materialize)
-                  →  feast-registry + feast-offline + feast-online + feast-ui
-                  →  nginx (starts last, begins accepting connections)
+postgres + redis  →  feast-init (generate → apply → materialize)   ─┐
+keycloak (~60 s to import realm, healthy check on /realms/feast-realm) ─┤
+                                                                        ├──→ feast-registry/offline/online/ui  →  nginx
 ```
 
-The first run takes ~2 minutes for `feast-init` to generate synthetic data and
-materialize features. Subsequent starts are fast (data lives in Docker volumes).
+The first run takes **~3 minutes**: `feast-init` generates synthetic data and
+materializes features (~2 min), Keycloak imports the realm (~60 s). These run
+in parallel so total time is whichever finishes last. Subsequent starts are
+fast (data and Keycloak state persist in Docker volumes).
 
 ---
 
@@ -280,6 +290,71 @@ Expected output:
 
 ---
 
+## Part 3 — RBAC Test (Keycloak OIDC)
+
+Two users are pre-configured in Keycloak via `keycloak/realm-export.json`:
+
+| User | Password | Role | Keycloak Client |
+|------|----------|------|-----------------|
+| `alice` | `password123` | `admin` | `feast-app` |
+| `bob` | `password123` | `collection_officer` | `feast-app` |
+
+### Role Access Matrix
+
+| Feature View | `admin` (alice) | `collection_officer` (bob) |
+|---|:---:|:---:|
+| `customer_credit_stats` | Full CRUD + Read | Blocked |
+| `customer_behavior_stats` | Full CRUD + Read | Read only |
+
+### Step 1 — Generate client configs
+
+```bash
+export FEAST_SERVER_HOST=ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com
+export FEAST_CERT_PATH=~/.feast/ca.crt
+
+envsubst < client/feature_store_alice.yaml > /tmp/fs_alice.yaml
+envsubst < client/feature_store_bob.yaml   > /tmp/fs_bob.yaml
+```
+
+The templates embed OIDC credentials and point `auth_discovery_url` to
+`https://$FEAST_SERVER_HOST/realms/feast-realm/...` (routed through nginx).
+
+### Step 2 — Run the RBAC test
+
+```bash
+uv run python client/test_rbac.py
+```
+
+Expected output:
+```
+============================================================
+ TEST 1: alice (admin) — full access
+============================================================
+  ✓ alice DESCRIBE credit_stats:   customer_credit_stats
+  ✓ alice DESCRIBE behavior_stats: customer_behavior_stats
+
+============================================================
+ TEST 2: bob (collection_officer) — behavior view only
+============================================================
+  ✓ bob DESCRIBE behavior_stats:  customer_behavior_stats
+  ✓ bob DESCRIBE credit_stats:    correctly blocked (PermissionError)
+
+============================================================
+ Results: 4 passed, 0 failed
+============================================================
+```
+
+> **Note:** `test_client.py` returns `401 Unauthenticated` after auth is enabled.
+> Use `test_rbac.py` for all testing once the stack is running with auth.
+
+### Verifying Keycloak manually
+
+Open `https://your.hostname.com/realms/feast-realm/.well-known/openid-configuration`
+in a browser to confirm the realm is live. Log in to the Keycloak admin console
+at `https://your.hostname.com/realms/master` (admin / admin) to inspect users and roles.
+
+---
+
 ## Troubleshooting
 
 ### SSL certificate error on client
@@ -358,6 +433,46 @@ curl -k https://ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com/
 ```
 
 If this times out, the security group is blocking the connection.
+
+---
+
+### `401 Unauthenticated` on every request
+
+The Feast servers now require a JWT token. Use the alice/bob client configs
+with `test_rbac.py` instead of `test_client.py`. Verify the token can be
+fetched manually:
+
+```bash
+curl -s -X POST \
+  https://your.hostname.com/realms/feast-realm/protocol/openid-connect/token \
+  -k \
+  -d "client_id=feast-app" \
+  -d "client_secret=feast-secret" \
+  -d "username=alice" \
+  -d "password=password123" \
+  -d "grant_type=password" | python -m json.tool | grep access_token
+```
+
+---
+
+### `403 Permission Denied` (unexpected for alice)
+
+Alice should have full access. If she's blocked, the role name in Keycloak
+doesn't match `RoleBasedPolicy(roles=["admin"])`. Decode the JWT at
+[jwt.io](https://jwt.io) and check that `resource_access.feast-app.roles`
+contains `"admin"` (case-sensitive, client role — not realm role).
+
+---
+
+### Feast servers waiting indefinitely for Keycloak
+
+Keycloak takes ~60 seconds to import the realm on first run. Check progress:
+
+```bash
+docker compose logs feast-keycloak --follow
+# Wait for: "Added user 'alice' to '/feast-realm'"
+# Then: feast-registry/offline/online will start automatically
+```
 
 ---
 

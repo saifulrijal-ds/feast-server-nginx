@@ -1,0 +1,74 @@
+{
+  "realm": "feast-realm",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "bruteForceProtected": false,
+  "clients": [
+    {
+      "clientId": "feast-app",
+      "name": "Feast Feature Store App",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "feast-secret",
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "attributes": {}
+    }
+  ],
+  "roles": {
+    "realm": [],
+    "client": {
+      "feast-app": [
+        {
+          "name": "admin",
+          "description": "Full CRUD and read access to all feature store resources",
+          "composite": false,
+          "clientRole": true
+        },
+        {
+          "name": "collection_officer",
+          "description": "Read-only access to customer_behavior_stats",
+          "composite": false,
+          "clientRole": true
+        }
+      ]
+    }
+  },
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": false,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password123",
+          "temporary": false
+        }
+      ],
+      "clientRoles": {
+        "feast-app": ["admin"]
+      }
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": false,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password123",
+          "temporary": false
+        }
+      ],
+      "clientRoles": {
+        "feast-app": ["collection_officer"]
+      }
+    }
+  ]
+}

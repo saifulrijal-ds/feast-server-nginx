@@ -8,6 +8,8 @@ This is a **Feast 0.62.0 Proof of Concept** demonstrating a production-ready dep
 
 The domain is **Multifinance Company Credit Risk modeling** with two feature views: `customer_credit_stats` (7 features) and `customer_behavior_stats` (6 features), materialized from synthetic Parquet data into Redis.
 
+Authentication uses **Feast OIDC AuthZ Manager** backed by **Keycloak 26.2**. Two users are pre-configured via realm auto-import: `alice` (admin — full access) and `bob` (collection_officer — `customer_behavior_stats` read-only).
+
 ---
 
 ## Development Setup (Python Environment with uv)
@@ -53,11 +55,12 @@ nginx (ports 80/443)
     ├─ /feast.serving.* → feast-online:6566 (gRPC)
     ├─ /arrow.flight.protocol.* → feast-offline:8815 (Arrow Flight)
     ├─ /get-online-features, /push, /health → feast-online:6566 (REST)
+    ├─ /realms/* → keycloak:8080 (OIDC token acquisition)
     └─ / → feast-ui:8888 (HTTP)
 
 Internal Docker network (no exposure):
     feast-registry, feast-online, feast-offline, feast-ui (all on custom bridge)
-    postgres:5432, redis:6379
+    keycloak:8080, postgres:5432, redis:6379
 ```
 
 **Key design principle**: nginx handles ALL TLS; Feast services run plain (FEAST_TLS=false).
@@ -65,9 +68,10 @@ Internal Docker network (no exposure):
 ### Container Startup Order
 
 1. **postgres** + **redis** (healthcheck required to proceed)
-2. **feast-init** (depends on both healthy, runs once, exits with code 0 or blocks all others)
-3. **feast-registry**, **feast-offline**, **feast-online**, **feast-ui** (depend on init success)
-4. **nginx** (depends on all Feast services healthy)
+2. **keycloak** (starts in parallel with feast-init, ~60 s health check on `feast-realm` OIDC discovery)
+3. **feast-init** (depends on postgres + redis; runs once, exits with code 0 or blocks all others)
+4. **feast-registry**, **feast-offline**, **feast-online**, **feast-ui** (depend on BOTH feast-init success AND keycloak healthy)
+5. **nginx** (depends on all Feast services)
 
 ### Data Pipeline
 
@@ -162,15 +166,19 @@ Expects output showing [1] DISCOVER, [2] TRAINING, [3] SERVING, [4] CONSISTENCY 
 |------|---------|
 | **docker-compose.yml** | Container orchestration, health checks, volumes, dependencies |
 | **Dockerfile.feast** | Python 3.11, Feast 0.62.0 + extras, non-root user (feastuser) |
-| **feature_repo/feature_definitions.py** | Entity + 2 FeatureViews; defines schema, TTL, source paths |
+| **feature_repo/feature_definitions.py** | Entity + 2 FeatureViews + 2 Permission objects (RBAC) |
 | **feature_repo/generate_data.py** | Synthetic data generator (5000 customers, 2 feature tables) |
 | **feature_repo/init.sh** | Orchestrates: generate → apply → materialize |
 | **feature_repo/start_*.sh** | Launches registry, offline, online servers (gRPC listening) |
-| **nginx/nginx.conf** | Routing by path, TLS config, gRPC proxying, upstream definitions |
+| **nginx/nginx.conf** | Routing by path, TLS config, gRPC proxying, Keycloak proxy |
+| **keycloak/realm-export.json** | Auto-imported realm: feast-app client, roles, alice/bob users |
 | **scripts/gen_certs.sh** | Self-signed cert + key generation (openssl) |
 | **scripts/diagnose.sh** | DNS/connectivity troubleshooter for ngrok/proxies |
-| **client/test_client.py** | 4-step client test: discover, train, serve, consistency check |
-| **client/feature_store_*.yaml** | Config templates for different deployment modes (nginx/plain/direct TLS) |
+| **client/test_client.py** | 4-step client test (no auth — will 401 after auth is enabled) |
+| **client/test_rbac.py** | RBAC access test: alice (admin) vs bob (collection_officer) |
+| **client/feature_store_alice.yaml** | Client template for alice (admin role) with OIDC auth |
+| **client/feature_store_bob.yaml** | Client template for bob (collection_officer role) with OIDC auth |
+| **client/feature_store_nginx.yaml** | Template reference — no auth, for unauthenticated local testing |
 
 ---
 
@@ -190,15 +198,40 @@ Expects output showing [1] DISCOVER, [2] TRAINING, [3] SERVING, [4] CONSISTENCY 
 
 Both source from `feature_repo/data/*.parquet` with `event_timestamp` field. Materialized to Redis online store for low-latency serving.
 
+### RBAC Permissions
+
+| Permission name | Role | Covers | Actions |
+|---|---|---|---|
+| `admin-full-access` | `admin` | all FeatureViews | CREATE, DESCRIBE, UPDATE, DELETE, READ_ONLINE, READ_OFFLINE, WRITE_ONLINE, WRITE_OFFLINE |
+| `co-behavior-read` | `collection_officer` | `customer_behavior_stats` only | DESCRIBE, READ_ONLINE, READ_OFFLINE |
+
+### Keycloak Users (auto-imported via `realm-export.json`)
+
+| Username | Password | Keycloak Client Role | Access |
+|---|---|---|---|
+| `alice` | `password123` | `admin` | Full access to both feature views |
+| `bob` | `password123` | `collection_officer` | Read-only on `customer_behavior_stats`; blocked from `customer_credit_stats` |
+
+Roles are **client roles** under the `feast-app` client, NOT realm roles. Feast reads them from `resource_access.feast-app.roles` in the JWT claim.
+
 ---
 
 ## Important Notes & Gotchas
 
 ### Environment Variables
 
-- **FEAST_HOSTNAME**: Required by docker-compose.yml for nginx server_name reference. Set before every `docker compose up`.
+- **FEAST_HOSTNAME**: Required by docker-compose.yml. Set before every `docker compose up`.
 - **FEAST_TLS**: Not set (defaults false). Services run plain; nginx handles TLS.
 - **FEAST_USAGE**: Set to "False" to disable telemetry.
+
+### Auth-Specific Notes
+
+- **`feast apply` bypasses auth** — it writes directly to PostgreSQL via `registry_type: sql`. The `auth:` block in `feature_store.yaml` is only enforced by the serving servers on incoming gRPC/REST requests.
+- **`Permission` import path** in Feast 0.62.0: use `from feast.permissions.permission import Permission`. `from feast import Permission` raises `ImportError`.
+- **Server vs client `auth_discovery_url`**: the server uses `http://keycloak:8080/realms/feast-realm/...` (Docker-internal, fetches JWKS directly). Client uses `https://FEAST_HOSTNAME/realms/feast-realm/...` (through nginx). Both point to the same Keycloak; Feast does not validate the `iss` claim so the URL mismatch is safe.
+- **`verify_ssl: false`** in client auth config disables TLS verification only for OIDC HTTP calls (the `requests` library). Feast's gRPC connections still use `cert:`. Remove for production (install `ca.crt` into system trust store instead).
+- **Keycloak startup** takes ~60 seconds. The feast servers wait for `service_healthy` (realm-specific OIDC endpoint check). Total first-run time is ~3 minutes.
+- **`test_client.py` returns 401** once auth is enabled — use `test_rbac.py` instead, which provides OIDC credentials per-request.
 
 ### SSL Certificates
 
@@ -287,6 +320,11 @@ No unit tests or pytest; POC is integration-test driven.
 | `feast-init` stuck or failing | PostgreSQL/Redis not healthy yet | Wait longer or check `docker compose logs postgres redis` |
 | Container keeps restarting | Missing certs or docker-compose syntax error | Check `docker compose logs feast-nginx` and run `docker exec feast-nginx nginx -t` |
 | Ports 6566/6570 exposed to host | Security misconfiguration | Verify Security Group rules; only 80/443 should be open |
+| `401 Unauthenticated` | Token not acquired or wrong `client_secret` | Verify client YAML `client_secret: feast-secret`; confirm `docker compose logs feast-keycloak` shows realm imported |
+| `403 Permission Denied` (unexpected) | Role name mismatch (case-sensitive) | Decode JWT at jwt.io; check `resource_access.feast-app.roles` matches exactly |
+| Roles missing from JWT | Assigned Realm Role instead of Client Role | Keycloak admin → `feast-app` client → Roles tab; reassign user there |
+| Feast servers not starting (waiting for keycloak) | Keycloak healthcheck failing | `docker compose logs feast-keycloak` — realm import takes ~60 s |
+| `ImportError: cannot import name 'Permission' from 'feast'` | Wrong import in Feast 0.62.0 | Use `from feast.permissions.permission import Permission` |
 
 ---
 
