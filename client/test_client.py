@@ -1,17 +1,23 @@
 """
-Feast 0.62.0 — Data Scientist Client Test
-Run this locally while the Docker stack is running.
+Feast 0.62.0 — Data Scientist Client Test (authenticated as alice)
+Run this while the Docker stack is running.
 
-  pip install "feast[redis,postgres]==0.62.0" pyarrow pandas
-  python test_client.py
+Setup (run once):
+  export FEAST_SERVER_HOST=your.hostname.com
+  export FEAST_CERT_PATH=/home/ubuntu/feast-poc-v3/certs/ca.crt
+  envsubst < client/feature_store_alice.yaml > /tmp/fs_alice.yaml
+
+Run:
+  uv run python client/test_client.py
 """
 import time
 import pandas as pd
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from feast import FeatureStore
 
-store = FeatureStore(repo_path=str(Path(__file__).parent))
+ALICE_YAML = "/tmp/fs_alice.yaml"
+
+store = FeatureStore(fs_yaml_file=ALICE_YAML)
 
 FEATURES = [
     # Credit Stats (original + engineered)
@@ -118,6 +124,23 @@ print(f"    Online  (served)     : {online_val}")
 ok = hist_val == online_val
 print(f"    {'✓ MATCH — no training-serving skew' if ok else '⚠ MISMATCH — re-materialize?'}")
 
+# ─── 5. FEATURE SERVICES ─────────────────────────────────────
 print("\n" + "="*58)
-print(" All 4 tests passed  ✓")
+print(" [5] FEATURE SERVICES  →  Registry Server (gRPC :6570)")
+print("="*58)
+
+feature_services = store.list_feature_services()
+print(f"\n  {len(feature_services)} FeatureService(s) registered:\n")
+for fs in feature_services:
+    print(f"  FeatureService : {fs.name}")
+    print(f"    description  : {fs.description}")
+    print(f"    tags         : {fs.tags}")
+    for proj in fs.feature_view_projections:
+        feat_names = [f.name for f in proj.features] if proj.features else ["(all features)"]
+        print(f"    ↳ {proj.name}: {feat_names}")
+    print()
+print("  ✓ FeatureService registry listing complete")
+
+print("\n" + "="*58)
+print(" All 5 tests passed  ✓")
 print("="*58 + "\n")

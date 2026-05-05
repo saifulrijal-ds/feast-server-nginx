@@ -26,7 +26,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
     "grpcio-health-checking" \
     "psycopg2-binary" \
     "pyarrow>=14.0" \
-    "pandas>=2.0"
+    "pandas>=2.0" \
+    "cryptography"
 
 # Create a non-root user for security and switch to it
 RUN useradd -m -s /bin/bash feastuser && \

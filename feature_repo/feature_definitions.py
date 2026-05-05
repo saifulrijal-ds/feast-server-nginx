@@ -2,7 +2,7 @@
 # Two FeatureViews: customer_credit_stats, customer_behavior_stats
 
 from datetime import timedelta
-from feast import Entity, FeatureView, Field, FileSource
+from feast import Entity, FeatureService, FeatureView, Field, FileSource
 from feast.permissions.action import AuthzedAction, READ
 from feast.permissions.permission import Permission
 from feast.permissions.policy import RoleBasedPolicy
@@ -58,6 +58,30 @@ customer_behavior_fv = FeatureView(
     tags={"team": "credit_risk", "model": "collection_strategy"},
 )
 
+# ── Feature Services ──────────────────────────────────────────
+# A FeatureService groups features for a specific model consumption pattern.
+# feast apply registers these to the PostgreSQL registry.
+# RBAC for get_online_features falls through to per-FeatureView checks.
+
+npf_prediction_service = FeatureService(
+    name="npf_prediction_service",
+    features=[
+        customer_credit_fv,
+        customer_behavior_fv[["payment_trend_3m", "early_payment_ratio"]],
+    ],
+    description="Features for NPF prediction model — credit risk + key payment behavior signals",
+    tags={"team": "credit_risk", "model": "npf_prediction"},
+)
+
+collection_strategy_service = FeatureService(
+    name="collection_strategy_service",
+    features=[
+        customer_behavior_fv,
+    ],
+    description="Features for collection strategy model — payment behavior metrics for collection officers",
+    tags={"team": "credit_risk", "model": "collection_strategy"},
+)
+
 # ── Permissions ───────────────────────────────────────────────
 # Roles (defined in Keycloak feast-app client):
 #   admin             → alice  — full access to all feature views
@@ -70,7 +94,7 @@ customer_behavior_fv = FeatureView(
 admin_permission = Permission(
     name="admin-full-access",
     policy=RoleBasedPolicy(roles=["admin"]),
-    types=[FeatureView],
+    types=[FeatureView, Entity],
     actions=[
         AuthzedAction.CREATE,
         AuthzedAction.DESCRIBE,
@@ -87,6 +111,43 @@ co_permission = Permission(
     policy=RoleBasedPolicy(roles=["collection_officer"]),
     types=[FeatureView],
     name_patterns=["customer_behavior_stats"],
+    actions=[
+        AuthzedAction.DESCRIBE,
+        *READ,
+    ],
+)
+
+co_entity_permission = Permission(
+    name="co-entity-describe",
+    policy=RoleBasedPolicy(roles=["collection_officer"]),
+    types=[Entity],
+    actions=[AuthzedAction.DESCRIBE],
+)
+
+# ── FeatureService Permissions ────────────────────────────────
+# Required for list_feature_services() and get_feature_service() via registry gRPC.
+# get_online_features() RBAC falls through to FeatureView-level checks above.
+#
+admin_fs_permission = Permission(
+    name="admin-fs-access",
+    policy=RoleBasedPolicy(roles=["admin"]),
+    types=[FeatureService],
+    actions=[
+        AuthzedAction.CREATE,
+        AuthzedAction.DESCRIBE,
+        AuthzedAction.UPDATE,
+        AuthzedAction.DELETE,
+        *READ,
+        AuthzedAction.WRITE_ONLINE,
+        AuthzedAction.WRITE_OFFLINE,
+    ],
+)
+
+co_fs_permission = Permission(
+    name="co-fs-collection-describe",
+    policy=RoleBasedPolicy(roles=["collection_officer"]),
+    types=[FeatureService],
+    name_patterns=["collection_strategy_service"],
     actions=[
         AuthzedAction.DESCRIBE,
         *READ,

@@ -151,12 +151,26 @@ online_store:
   cert: /home/ubuntu/.feast/ca.crt
 ```
 
-**Run end-to-end test**:
+**Run end-to-end test** (authenticated as alice — requires envsubst setup first):
 ```bash
+export FEAST_SERVER_HOST=your.hostname.com
+export FEAST_CERT_PATH=~/.feast/ca.crt
+envsubst < client/feature_store_alice.yaml > /tmp/fs_alice.yaml
 uv run python client/test_client.py
 ```
 
-Expects output showing [1] DISCOVER, [2] TRAINING, [3] SERVING, [4] CONSISTENCY CHECK with latencies.
+Expects output showing [1] DISCOVER, [2] TRAINING, [3] SERVING, [4] CONSISTENCY CHECK, [5] FEATURE SERVICES with real feature data.
+
+**Run RBAC test** (with Keycloak auth — use this after auth is enabled):
+```bash
+export FEAST_SERVER_HOST=your.hostname.com
+export FEAST_CERT_PATH=~/.feast/ca.crt
+envsubst < client/feature_store_alice.yaml > /tmp/fs_alice.yaml
+envsubst < client/feature_store_bob.yaml   > /tmp/fs_bob.yaml
+uv run python client/test_rbac.py
+```
+
+Expects 8 passed, 0 failed across TEST 1 (alice FeatureView), TEST 2 (bob FeatureView), TEST 3 (FeatureService).
 
 ---
 
@@ -166,7 +180,7 @@ Expects output showing [1] DISCOVER, [2] TRAINING, [3] SERVING, [4] CONSISTENCY 
 |------|---------|
 | **docker-compose.yml** | Container orchestration, health checks, volumes, dependencies |
 | **Dockerfile.feast** | Python 3.11, Feast 0.62.0 + extras, non-root user (feastuser) |
-| **feature_repo/feature_definitions.py** | Entity + 2 FeatureViews + 2 Permission objects (RBAC) |
+| **feature_repo/feature_definitions.py** | Entity + 2 FeatureViews + 2 FeatureServices + 6 Permission objects (RBAC) |
 | **feature_repo/generate_data.py** | Synthetic data generator (5000 customers, 2 feature tables) |
 | **feature_repo/init.sh** | Orchestrates: generate → apply → materialize |
 | **feature_repo/start_*.sh** | Launches registry, offline, online servers (gRPC listening) |
@@ -174,7 +188,7 @@ Expects output showing [1] DISCOVER, [2] TRAINING, [3] SERVING, [4] CONSISTENCY 
 | **keycloak/realm-export.json** | Auto-imported realm: feast-app client, roles, alice/bob users |
 | **scripts/gen_certs.sh** | Self-signed cert + key generation (openssl) |
 | **scripts/diagnose.sh** | DNS/connectivity troubleshooter for ngrok/proxies |
-| **client/test_client.py** | 4-step client test (no auth — will 401 after auth is enabled) |
+| **client/test_client.py** | 5-step client test authenticated as alice (DISCOVER, TRAINING, SERVING, CONSISTENCY, FEATURE SERVICES) |
 | **client/test_rbac.py** | RBAC access test: alice (admin) vs bob (collection_officer) |
 | **client/feature_store_alice.yaml** | Client template for alice (admin role) with OIDC auth |
 | **client/feature_store_bob.yaml** | Client template for bob (collection_officer role) with OIDC auth |
@@ -202,8 +216,11 @@ Both source from `feature_repo/data/*.parquet` with `event_timestamp` field. Mat
 
 | Permission name | Role | Covers | Actions |
 |---|---|---|---|
-| `admin-full-access` | `admin` | all FeatureViews | CREATE, DESCRIBE, UPDATE, DELETE, READ_ONLINE, READ_OFFLINE, WRITE_ONLINE, WRITE_OFFLINE |
-| `co-behavior-read` | `collection_officer` | `customer_behavior_stats` only | DESCRIBE, READ_ONLINE, READ_OFFLINE |
+| `admin-full-access` | `admin` | all FeatureViews + Entity | CREATE, DESCRIBE, UPDATE, DELETE, READ_ONLINE, READ_OFFLINE, WRITE_ONLINE, WRITE_OFFLINE |
+| `admin-fs-access` | `admin` | all FeatureSevices | CREATE, DESCRIBE, UPDATE, DELETE, READ_ONLINE, READ_OFFLINE, WRITE_ONLINE, WRITE_OFFLINE |
+| `co-behavior-read` | `collection_officer` | `customer_behavior_stats` FeatureView only | DESCRIBE, READ_ONLINE, READ_OFFLINE |
+| `co-entity-describe` | `collection_officer` | Entity | DESCRIBE |
+| `co-fs-collection-describe` | `collection_officer` | `collection_strategy_service` FeatureService only | DESCRIBE, READ_ONLINE, READ_OFFLINE |
 
 ### Keycloak Users (auto-imported via `realm-export.json`)
 
@@ -231,7 +248,7 @@ Roles are **client roles** under the `feast-app` client, NOT realm roles. Feast 
 - **Server vs client `auth_discovery_url`**: the server uses `http://keycloak:8080/realms/feast-realm/...` (Docker-internal, fetches JWKS directly). Client uses `https://FEAST_HOSTNAME/realms/feast-realm/...` (through nginx). Both point to the same Keycloak; Feast does not validate the `iss` claim so the URL mismatch is safe.
 - **`verify_ssl: false`** in client auth config disables TLS verification only for OIDC HTTP calls (the `requests` library). Feast's gRPC connections still use `cert:`. Remove for production (install `ca.crt` into system trust store instead).
 - **Keycloak startup** takes ~60 seconds. The feast servers wait for `service_healthy` (realm-specific OIDC endpoint check). Total first-run time is ~3 minutes.
-- **`test_client.py` returns 401** once auth is enabled — use `test_rbac.py` instead, which provides OIDC credentials per-request.
+- **`test_client.py` authenticates as alice** — run `envsubst < client/feature_store_alice.yaml > /tmp/fs_alice.yaml` before executing. Uses `fs_yaml_file=` init (not `repo_path=`).
 
 ### SSL Certificates
 
@@ -276,7 +293,7 @@ docker compose logs feast-init
    FEAST_HOSTNAME=your.hostname.com docker compose up --build
    ```
 3. `feast-init` will apply new definitions to the registry.
-4. Test on client: `python client/test_client.py`
+4. Test on client: `uv run python client/test_client.py`
 
 ### Modifying Data Generation
 
@@ -300,11 +317,19 @@ Run `scripts/diagnose.sh` on the client machine to check DNS resolution, TLS han
 
 **Server-side**: Handled by `feast-init` container (automated via docker-compose).
 
-**Client-side**: Run `python client/test_client.py` from a machine with Feast SDK installed and `feature_store.yaml` configured. Expects:
-- [1] Feature discovery via registry gRPC
-- [2] Historical features from offline store (Arrow Flight)
-- [3] Online serving from online store (REST) with latency < 100ms
-- [4] Consistency check (same feature value in both stores)
+**Client-side**: Run as alice (requires `envsubst` setup — see Client Setup in CLAUDE.md):
+```bash
+export FEAST_SERVER_HOST=your.hostname.com
+export FEAST_CERT_PATH=/home/ubuntu/feast-poc-v3/certs/ca.crt
+envsubst < client/feature_store_alice.yaml > /tmp/fs_alice.yaml
+uv run python client/test_client.py
+```
+Expects:
+- [1] DISCOVER — feature view listing via registry gRPC
+- [2] TRAINING — historical features from offline store (Arrow Flight)
+- [3] SERVING — online features from online store (REST) with latency < 100ms
+- [4] CONSISTENCY CHECK — same feature value in both stores
+- [5] FEATURE SERVICES — list of registered FeatureService objects
 
 No unit tests or pytest; POC is integration-test driven.
 

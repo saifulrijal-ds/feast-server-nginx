@@ -1,104 +1,180 @@
-# Feast 0.62.0 — Remote Access via nginx + Keycloak RBAC (Docker on EC2)
+# Feast 0.62.0 — Production Feature Store on AWS EC2
 
-All Feast services run inside Docker. A single **nginx** container is the only
-public entry point on ports **80** and **443**. No Feast-specific ports are
-exposed to the internet. Requests are authenticated via **Keycloak OIDC** with
-role-based access control enforced by Feast's AuthZ Manager.
+A learning-oriented proof-of-concept showing how to deploy a complete
+**Feature Store** for a Multifinance Company credit risk team — with TLS,
+authentication, role-based access control, and named feature bundles per model.
+
+---
+
+## What You Will Learn
+
+By running this project end-to-end you will understand:
+
+1. What a feature store does and why it exists
+2. How Feast separates **offline** (training) and **online** (serving) stores
+3. How **nginx** acts as the single public gateway for three different protocols
+4. How **Keycloak OIDC** authenticates users and how Feast enforces **RBAC**
+5. What a **FeatureService** is and why it matters for MLOps
+6. How two different data scientists (alice and bob) see different data from the same server
+
+---
+
+## Key Concepts
+
+### Feature Store
+
+A feature store is the data layer between raw data and ML models. It solves two problems:
+
+| Problem | Solution |
+|---|---|
+| **Training-serving skew** — model trained on different values than it serves | Both training and serving read features from the same definitions |
+| **Repeated feature engineering** — every team reinvents the same transformations | Define once, reuse across all models |
+
+### Offline vs Online Store
+
+| Store | Purpose | Technology | Latency |
+|---|---|---|---|
+| **Offline** | Historical features for model training | Parquet files (Arrow Flight) | ~100s ms for bulk |
+| **Online** | Latest features for real-time serving | Redis | ~1–10 ms |
+
+`feast materialize` copies the latest snapshot from offline → online. The same feature definitions govern both.
+
+### FeatureService
+
+A `FeatureService` is a named, versioned bundle of features for a specific model.
+Instead of passing 13 `"view:feature"` strings, the model calls one named service:
+
+```python
+# Without FeatureService — fragile, not versioned
+features=["customer_credit_stats:npf_flag", "customer_credit_stats:days_past_due", ...]
+
+# With FeatureService — versioned contract, managed centrally
+features=store.get_feature_service("npf_prediction_service")
+```
+
+Two services are defined in this project:
+
+| Service | Features | Who Can Access |
+|---|---|---|
+| `npf_prediction_service` | All 7 credit + 2 behavior features | `admin` only |
+| `collection_strategy_service` | All 6 behavior features | `admin` + `collection_officer` |
+
+### RBAC — Two Layers
+
+Authentication (who are you?) and authorization (what can you do?) are handled by two different systems:
+
+```
+Keycloak                           Feast Permission objects
+────────────────────               ─────────────────────────────────
+Issues JWT token                   Check roles from JWT against
+with role in:                      RoleBasedPolicy per resource:
+resource_access
+  .feast-app
+    .roles: ["admin"]   ─────────► Permission(types=[FeatureView],
+                                              policy=RoleBasedPolicy(["admin"]))
+```
+
+The role name string is the only contract between these two systems. If they don't match exactly (case-sensitive), every request returns 403.
 
 ---
 
 ## Architecture
 
 ```
-Internet
-    │
-    ▼
-nginx :443 (TLS termination)
-    ├── /feast.registry.*          → feast-registry:6570  (gRPC)
-    ├── /feast.serving.*           → feast-online:6566    (gRPC)
-    ├── /arrow.flight.protocol.*   → feast-offline:8815   (Arrow Flight gRPC)
-    ├── /get-online-features       → feast-online:6566    (REST)
-    ├── /realms/*                  → keycloak:8080        (OIDC token endpoint)
-    └── /                         → feast-ui:8888         (HTTP)
+Internet (ports 80, 443 only)
+        │
+        ▼
+  nginx :443 (TLS termination — only public entry point)
+        │
+        ├── /feast.registry.*          grpc://feast-registry:6570
+        ├── /feast.serving.*           grpc://feast-online:6566
+        ├── /arrow.flight.protocol.*   grpc://feast-offline:8815
+        ├── /get-online-features       http://feast-online:6566   (REST)
+        ├── /realms/*                  http://keycloak:8080        (OIDC)
+        └── /                         http://feast-ui:8888
 
-nginx :80  → 301 redirect to :443
-
-Internal Docker network only (not exposed):
-    feast-registry:6570
-    feast-offline:8815
-    feast-online:6566
-    feast-ui:8888
-    keycloak:8080
-    postgres:5432
-    redis:6379
+Internal Docker network (never exposed to internet):
+    feast-registry  feast-offline  feast-online  feast-ui
+    keycloak        postgres       redis
 ```
+
+**Why three different protocols on one port?**
+nginx routes by HTTP/2 path prefix. gRPC encodes the service name in the
+`:path` header (e.g., `/feast.registry.RegistryServer/GetRegistry`), so nginx
+can distinguish gRPC from REST without inspecting request bodies.
+
+### Container Startup Order
+
+```
+postgres ──┐
+           ├──► feast-init (generate → apply → materialize) ──┐
+redis   ───┘                                                   │
+                                                               ├──► feast-registry  ──┐
+keycloak (~60s to import realm) ───────────────────────────────┘──► feast-offline   ──├──► nginx
+                                                                  ► feast-online    ──┘
+                                                                  ► feast-ui
+```
+
+If `feast-init` fails (e.g., PostgreSQL not ready), the three servers never start.
+If Keycloak takes too long to become healthy, the servers wait indefinitely.
+Check with `docker compose logs feast-init` if anything seems stuck.
 
 ---
 
-## File Layout
+## Project File Map
 
 ```
 feast-poc-v3/
-├── docker-compose.yml
-├── Dockerfile.feast
+├── docker-compose.yml              Container orchestration + startup order
+├── Dockerfile.feast                Python 3.11 + Feast 0.62.0 image
 ├── nginx/
-│   └── nginx.conf                  # nginx routing + Keycloak proxy
+│   └── nginx.conf                  Protocol routing + TLS config
 ├── keycloak/
-│   └── realm-export.json           # auto-imported realm: users, roles, client
+│   └── realm-export.json           Auto-imported realm: roles, users, client
 ├── feature_repo/
-│   ├── feature_store.yaml          # server-side store + OIDC auth config
-│   ├── feature_definitions.py      # Entity, FeatureViews, Permission objects
-│   ├── generate_data.py            # synthetic Parquet data
-│   ├── init.sh                     # generate → apply → materialize
-│   ├── start_registry.sh
-│   ├── start_offline.sh
-│   └── start_online.sh
-├── certs/                          # generated by gen_certs.sh (git-ignored)
+│   ├── feature_store.yaml          Server-side config (PostgreSQL + Redis + OIDC)
+│   ├── feature_definitions.py      Entity, FeatureViews, FeatureServices, Permissions
+│   ├── generate_data.py            Synthetic Parquet data (2000 customers, 6 snapshots)
+│   ├── init.sh                     Bootstrap: generate → feast apply → materialize
+│   ├── start_registry.sh           Launches gRPC registry server
+│   ├── start_offline.sh            Launches Arrow Flight offline server
+│   └── start_online.sh             Launches REST + gRPC online server
+├── certs/                          TLS certs (created by gen_certs.sh, git-ignored)
 ├── scripts/
-│   ├── gen_certs.sh                # self-signed TLS cert generator
-│   └── diagnose.sh                 # connectivity checker
-├── pyproject.toml                  # Python dependencies (use with uv)
-├── uv.lock                         # uv dependency lock file
-├── CLAUDE.md                       # Development guide for Claude Code
-├── DATA_SUMMARY.md                 # Synthetic dataset schema
-└── client/
-    ├── feature_store.yaml          # active client config (set by envsubst)
-    ├── feature_store_nginx.yaml    # template — no auth
-    ├── feature_store_alice.yaml    # template — alice (admin), use envsubst
-    ├── feature_store_bob.yaml      # template — bob (collection_officer), use envsubst
-    ├── test_client.py              # 4-step end-to-end test (no auth)
-    └── test_rbac.py                # RBAC test: alice vs bob access
+│   ├── gen_certs.sh                Self-signed TLS cert generator
+│   └── diagnose.sh                 Connectivity troubleshooter
+├── pyproject.toml                  Python dependencies managed with uv
+├── client/
+│   ├── feature_store.yaml          Active client config (edit hostname here)
+│   ├── feature_store_alice.yaml    Template for alice (admin) — uses envsubst
+│   ├── feature_store_bob.yaml      Template for bob (collection_officer) — uses envsubst
+│   └── test_client.py              5-step end-to-end test authenticated as alice
+│   └── test_rbac.py                RBAC test: alice vs bob, FeatureView + FeatureService
+└── README.md                       This file
 ```
 
 ---
 
-## Project Details
+## Part 1 — Server Setup
 
-**Project Name:** `credit_risk_modeling`  
-**Domain:** Multifinance Company Credit Risk modeling  
-**Features:** 2 feature views, 13 total features for credit risk assessment  
-**Entity:** customer_id (2,000 synthetic customers)  
-**Materialization:** Parquet → Redis (90-day TTL)
+### Step 1 — Open Firewall Ports (EC2 Security Group)
 
----
+In the AWS Console → EC2 → Security Groups, add inbound rules:
 
-## Part 1 — Server Setup (EC2 instance)
+| Type  | Protocol | Port | Source    | Reason |
+|-------|----------|------|-----------|--------|
+| HTTP  | TCP      | 80   | 0.0.0.0/0 | Redirect to HTTPS |
+| HTTPS | TCP      | 443  | 0.0.0.0/0 | All Feast + Keycloak traffic |
+| SSH   | TCP      | 22   | your IP   | Management |
 
-### Step 1 — Open firewall ports
-
-In your EC2 Security Group, add **inbound rules**:
-
-| Type  | Protocol | Port | Source    |
-|-------|----------|------|-----------|
-| HTTP  | TCP      | 80   | 0.0.0.0/0 |
-| HTTPS | TCP      | 443  | 0.0.0.0/0 |
-| SSH   | TCP      | 22   | your IP   |
-
-> Do **not** open 6566, 6570, 8815, or 8888 — those stay internal to Docker.
+> **Do NOT open** 6566, 6570, 8815, or 8888. Those are Feast-internal ports
+> that only nginx needs to reach. Exposing them bypasses authentication entirely.
 
 ---
 
-### Step 2 — Get the instance public DNS
+### Step 2 — Get the Public DNS Name
+
+Run this on the EC2 instance to retrieve the public hostname:
 
 ```bash
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
@@ -108,124 +184,137 @@ curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
   http://169.254.169.254/latest/meta-data/public-hostname
 ```
 
-Example output:
-```
-ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com
-```
+Example: `ec2-16-78-34-107.ap-southeast-3.compute.amazonaws.com`
 
-Save this — you will use it in the next step and on the client side.
+Save this value — you will use it in every step below.
 
 ---
 
-### Step 3 — Generate TLS certificates
+### Step 3 — Generate TLS Certificates
 
 ```bash
-bash scripts/gen_certs.sh ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com
+bash scripts/gen_certs.sh ec2-16-78-34-107.ap-southeast-3.compute.amazonaws.com
 ```
 
 This creates three files in `certs/`:
 
-| File           | Purpose                                  |
-|----------------|------------------------------------------|
-| `server.key`   | Private key — keep on server only        |
-| `server.crt`   | Server certificate used by nginx         |
-| `ca.crt`       | CA cert — copy this to client machines   |
+| File | Purpose | Share? |
+|---|---|---|
+| `server.key` | Private key used by nginx | Server only — never share |
+| `server.crt` | Server certificate | Server only |
+| `ca.crt` | CA bundle (self-signed = same as crt) | Copy to every client machine |
+
+> **Why a custom CA?** The cert is self-signed — no public CA validates it.
+> Clients need `ca.crt` so their gRPC and HTTPS calls can verify the server.
+> Without it, every connection fails with `SSLCertVerificationError`.
+
+> **Important:** If you get a new EC2 instance (different public hostname),
+> regenerate the cert. The old cert's Subject Alternative Name won't cover
+> the new hostname and all client connections will fail TLS verification.
 
 ---
 
-### Step 4 — Start the stack
+### Step 4 — Start the Stack
 
 ```bash
-FEAST_HOSTNAME=ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com \
+FEAST_HOSTNAME=ec2-16-78-34-107.ap-southeast-3.compute.amazonaws.com \
   docker compose up --build
 ```
 
-> `FEAST_HOSTNAME` is stored in the environment for reference. nginx uses
-> `server_name _;` (catch-all) so the hostname does not need to match exactly.
+What happens on first run:
 
-Container startup order:
+1. **postgres + redis** start and become healthy
+2. **feast-init** runs three steps sequentially:
+   - `generate_data.py` → creates synthetic Parquet files (2000 customers, 6 time snapshots)
+   - `feast apply` → registers Entity, FeatureViews, FeatureServices, Permissions to PostgreSQL
+   - `feast materialize` → copies latest feature values from Parquet into Redis
+3. **keycloak** imports `realm-export.json` in parallel (~60s) — creates `feast-realm`, roles, and users
+4. Once **both** feast-init succeeds AND keycloak is healthy → feast-registry, feast-offline, feast-online, feast-ui start
+5. **nginx** starts last, resolves all upstream hostnames and begins routing
 
-```
-postgres + redis  →  feast-init (generate → apply → materialize)   ─┐
-keycloak (~60 s to import realm, healthy check on /realms/feast-realm) ─┤
-                                                                        ├──→ feast-registry/offline/online/ui  →  nginx
-```
-
-The first run takes **~3 minutes**: `feast-init` generates synthetic data and
-materializes features (~2 min), Keycloak imports the realm (~60 s). These run
-in parallel so total time is whichever finishes last. Subsequent starts are
-fast (data and Keycloak state persist in Docker volumes).
+First run takes **~3 minutes**. Subsequent starts are fast (data persists in Docker volumes).
 
 ---
 
-### Step 5 — Verify the server
+### Step 5 — Verify the Server
 
 ```bash
-# UI responds over HTTPS
+# All containers should be Up
+docker compose ps
+
+# feast-init ran successfully
+docker compose logs feast-init | tail -10
+
+# nginx is routing (check for routed requests)
+docker logs feast-nginx --tail 20
+
+# Feast ports are NOT visible on the host (should return empty)
+ss -tlnp | grep -E '6566|6570|8815|8888'
+
+# HTTPS responds (Feast UI)
 curl -k https://localhost/
 
-# HTTP redirects to HTTPS
-curl -v http://localhost/ 2>&1 | grep "301\|Location"
-
-# Feast ports are NOT exposed to the host
-ss -tlnp | grep -E '6566|6570|8815|8888'   # → no output
-
-# nginx logs show routed requests
-docker logs feast-nginx --tail 20
+# Keycloak OIDC discovery is reachable
+curl -k https://localhost/realms/feast-realm/.well-known/openid-configuration | python -m json.tool | head -10
 ```
 
 ---
 
-### Restarting the stack
+### Restarting After Changes
 
 ```bash
-# Stop all containers (data volumes preserved)
+# Stop (data volumes preserved)
 docker compose down
 
-# Start again (no rebuild needed)
-FEAST_HOSTNAME=ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com \
-  docker compose up -d
+# Start again without rebuild
+FEAST_HOSTNAME=your.hostname.com docker compose up -d
 
-# Rebuild images (only needed after code changes)
-FEAST_HOSTNAME=ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com \
-  docker compose up --build
+# Rebuild after Dockerfile or Python file changes
+FEAST_HOSTNAME=your.hostname.com docker compose up --build
+
+# If nginx crash-loops after restart (upstream servers not ready yet):
+docker restart feast-nginx
 ```
 
 ---
 
-## Part 2 — Client Setup (Data Scientist machine)
+## Part 2 — Client Setup
 
-### Step 1 — Install dependencies with uv
+### Step 1 — Install Python Dependencies
 
-Install [uv](https://docs.astral.sh/uv/) for Python dependency management, then:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) then:
 
 ```bash
-uv sync                    # Install all dependencies from pyproject.toml
+uv sync
 ```
 
-This installs Feast SDK + all required packages (pandas, pyarrow, mlflow, FastAPI, etc.).
+This installs Feast SDK + all dependencies declared in `pyproject.toml`.
 
 ---
 
-### Step 2 — Copy the CA certificate from the server
+### Step 2 — Copy the CA Certificate
 
 ```bash
 mkdir -p ~/.feast
 
-scp ubuntu@ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com:\
-/home/ubuntu/feast-poc-v3/certs/ca.crt \
-~/.feast/ca.crt
+# From the server machine directly
+cp /home/ubuntu/feast-poc-v3/certs/ca.crt ~/.feast/ca.crt
+
+# Or from a remote machine via scp
+scp ubuntu@your.hostname.com:/home/ubuntu/feast-poc-v3/certs/ca.crt ~/.feast/ca.crt
 ```
 
-> The CA cert is needed because the server uses a self-signed certificate.
-> Without it, every gRPC/HTTPS call raises an SSL verification error.
+Verify the cert covers your hostname:
+```bash
+openssl x509 -noout -text -in ~/.feast/ca.crt | grep -A 3 "Subject Alternative"
+# Should show: DNS:your.hostname.com, DNS:localhost, IP Address:127.0.0.1
+```
 
 ---
 
-### Step 3 — Create `feature_store.yaml`
+### Step 3 — Update `client/feature_store.yaml`
 
-Copy this into the working directory of your project (same folder as
-`test_client.py`):
+The file already exists in `client/feature_store.yaml`. Update the hostname if you moved to a new EC2 instance:
 
 ```yaml
 project: credit_risk_modeling
@@ -233,99 +322,93 @@ entity_key_serialization_version: 3
 
 registry:
   registry_type: remote
-  path: your.hostname.com:443
-  cert: ~/.feast/ca.crt
+  path: your.hostname.com:443         # ← update this
+  cert: /home/ubuntu/feast-poc-v3/certs/ca.crt
 
 offline_store:
   type: remote
-  host: your.hostname.com
+  host: your.hostname.com             # ← and this
   port: 443
   scheme: https
-  cert: ~/.feast/ca.crt
+  cert: /home/ubuntu/feast-poc-v3/certs/ca.crt
 
 online_store:
   type: remote
-  path: https://your.hostname.com:443
-  cert: ~/.feast/ca.crt
+  path: https://your.hostname.com:443 # ← and this
+  cert: /home/ubuntu/feast-poc-v3/certs/ca.crt
 ```
 
-Replace `your.hostname.com` with your EC2 public hostname from Part 1 Step 2.  
-The `feature_store.yaml` file is already configured in the `client/` directory.
+> Note: `registry.path` uses `hostname:443` format (not `https://hostname:443`).
+> The `https://` prefix causes a port-parsing error in Feast 0.62.0.
 
 ---
 
-### Step 4 — Run the test
+## Part 3 — Running the Tests
 
+### Test A — End-to-End Connectivity Test (`test_client.py`)
+
+This test authenticates as **alice** (admin role) and verifies all five Feast operations end-to-end.
+
+**Setup (run once per shell session):**
+```bash
+export FEAST_SERVER_HOST=your.hostname.com
+export FEAST_CERT_PATH=/home/ubuntu/feast-poc-v3/certs/ca.crt
+envsubst < client/feature_store_alice.yaml > /tmp/fs_alice.yaml
+```
+
+**Run:**
 ```bash
 uv run python client/test_client.py
 ```
 
-Expected output:
+What each step verifies:
 
-```
-==========================================================
- [1] DISCOVER  →  Registry Server (gRPC :6570)
-==========================================================
-  FeatureView : customer_behavior_stats  ...
-  FeatureView : customer_credit_stats    ...
-
-==========================================================
- [2] TRAINING  →  Offline Server (Arrow Flight :8815)
-==========================================================
-  Rows returned : 5
-  Latency       : ~400ms
-  ✓ Ready for model.fit(training_df)
-
-==========================================================
- [3] SERVING   →  Online Server (REST :6566)
-==========================================================
-  Latency : ~50ms
-  ✓ Ready for model.predict(feature_vector)
-
-==========================================================
- [4] CONSISTENCY CHECK
-==========================================================
-  ✓ MATCH — no training-serving skew
-```
+| Step | Operation | Path Through nginx |
+|---|---|---|
+| [1] DISCOVER | `list_feature_views()` via registry gRPC | `/feast.registry.*` → 6570 |
+| [2] TRAINING | `get_historical_features()` via Arrow Flight | `/arrow.flight.protocol.*` → 8815 |
+| [3] SERVING | `get_online_features()` via REST | `/get-online-features` → 6566 |
+| [4] CONSISTENCY | Cross-check offline vs online values | Both stores |
+| [5] FEATURE SERVICES | `list_feature_services()` via registry gRPC | `/feast.registry.*` → 6570 |
 
 ---
 
-## Part 3 — RBAC Test (Keycloak OIDC)
+### Test B — RBAC + FeatureService Test (`test_rbac.py`)
 
-Two users are pre-configured in Keycloak via `keycloak/realm-export.json`:
+This is the **main test** — it authenticates as two different users and verifies
+that RBAC is enforced correctly across FeatureViews and FeatureServices.
 
-| User | Password | Role | Keycloak Client |
-|------|----------|------|-----------------|
-| `alice` | `password123` | `admin` | `feast-app` |
-| `bob` | `password123` | `collection_officer` | `feast-app` |
-
-### Role Access Matrix
-
-| Feature View | `admin` (alice) | `collection_officer` (bob) |
-|---|:---:|:---:|
-| `customer_credit_stats` | Full CRUD + Read | Blocked |
-| `customer_behavior_stats` | Full CRUD + Read | Read only |
-
-### Step 1 — Generate client configs
+#### Step 1 — Set environment variables
 
 ```bash
-export FEAST_SERVER_HOST=ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com
-export FEAST_CERT_PATH=~/.feast/ca.crt
+export FEAST_SERVER_HOST=ec2-16-78-34-107.ap-southeast-3.compute.amazonaws.com
+export FEAST_CERT_PATH=/home/ubuntu/feast-poc-v3/certs/ca.crt
+```
 
+#### Step 2 — Generate authenticated client configs
+
+The template files (`feature_store_alice.yaml`, `feature_store_bob.yaml`) use
+`${FEAST_SERVER_HOST}` and `${FEAST_CERT_PATH}` as placeholders. `envsubst`
+replaces them with your environment variables:
+
+```bash
 envsubst < client/feature_store_alice.yaml > /tmp/fs_alice.yaml
 envsubst < client/feature_store_bob.yaml   > /tmp/fs_bob.yaml
 ```
 
-The templates embed OIDC credentials and point `auth_discovery_url` to
-`https://$FEAST_SERVER_HOST/realms/feast-realm/...` (routed through nginx).
+Inspect the output to verify substitution worked:
+```bash
+cat /tmp/fs_alice.yaml | grep -E "path:|host:|cert:|username:"
+```
 
-### Step 2 — Run the RBAC test
+#### Step 3 — Run the test
 
 ```bash
 uv run python client/test_rbac.py
 ```
 
 Expected output:
+
 ```
 ============================================================
  TEST 1: alice (admin) — full access
@@ -337,170 +420,374 @@ Expected output:
  TEST 2: bob (collection_officer) — behavior view only
 ============================================================
   ✓ bob DESCRIBE behavior_stats:  customer_behavior_stats
-  ✓ bob DESCRIBE credit_stats:    correctly blocked (PermissionError)
+  ✓ bob DESCRIBE credit_stats:    correctly blocked (FeastPermissionError)
 
 ============================================================
- Results: 4 passed, 0 failed
+ TEST 3: FeatureService — get_online_features via service bundle
+============================================================
+
+  alice (admin):
+  ✓ alice → npf_prediction_service (credit + behavior): {npf_flag: [...], ...}
+  ✓ alice → collection_strategy_service (behavior only): {avg_monthly_payment: [...], ...}
+
+  bob (collection_officer):
+  ✓ bob → collection_strategy_service (behavior only) ✓ allowed: {avg_monthly_payment: [...], ...}
+  ✓ bob → npf_prediction_service (contains credit stats) ✗ blocked: correctly blocked (FeastPermissionError)
+
+============================================================
+ Results: 8 passed, 0 failed
 ============================================================
 ```
 
-> **Note:** `test_client.py` returns `401 Unauthenticated` after auth is enabled.
-> Use `test_rbac.py` for all testing once the stack is running with auth.
+#### What TEST 3 is verifying
 
-### Verifying Keycloak manually
+When bob calls `get_online_features(features=npf_prediction_service)`, Feast:
 
-Open `https://your.hostname.com/realms/feast-realm/.well-known/openid-configuration`
-in a browser to confirm the realm is live. Log in to the Keycloak admin console
-at `https://your.hostname.com/realms/master` (admin / admin) to inspect users and roles.
+1. Calls `get_feature_service("npf_prediction_service")` on the registry — **blocked here** because bob's `co-fs-collection-describe` permission uses `name_patterns=["collection_strategy_service"]`, so `npf_prediction_service` doesn't match.
+2. If it had passed step 1, it would also be blocked at the FeatureView level (bob has no `READ_ONLINE` on `customer_credit_stats`).
+
+Two independent guards, both enforced.
 
 ---
 
-## Troubleshooting
+## Part 4 — Understanding RBAC Setup
 
-### SSL certificate error on client
+### How it is Configured
+
+RBAC involves **two files** that must agree on role names:
 
 ```
-ssl.SSLCertVerificationError: certificate verify failed
+keycloak/realm-export.json          feature_repo/feature_definitions.py
+──────────────────────────          ───────────────────────────────────
+Defines WHO                         Defines WHAT they can do
+
+roles:
+  client:
+    feast-app:
+      - name: "admin"        ─────► RoleBasedPolicy(roles=["admin"])
+      - name: "collection_officer" ► RoleBasedPolicy(roles=["collection_officer"])
+
+users:
+  alice → roles: ["admin"]
+  bob   → roles: ["collection_officer"]
 ```
 
-**Fix:** the `cert:` path in `feature_store.yaml` points to a missing or wrong
-file. Verify:
+The role name string (e.g., `"admin"`) is the only contract. Case-sensitive.
+
+### Current Permission Matrix
+
+| Permission name | Role | Resource Type | Resource Name | Actions |
+|---|---|---|---|---|
+| `admin-full-access` | `admin` | FeatureView, Entity | all | CREATE, DESCRIBE, UPDATE, DELETE, READ_ONLINE, READ_OFFLINE, WRITE_ONLINE, WRITE_OFFLINE |
+| `co-behavior-read` | `collection_officer` | FeatureView | `customer_behavior_stats` | DESCRIBE, READ_ONLINE, READ_OFFLINE |
+| `co-entity-describe` | `collection_officer` | Entity | all | DESCRIBE |
+| `admin-fs-access` | `admin` | FeatureService | all | all |
+| `co-fs-collection-describe` | `collection_officer` | FeatureService | `collection_strategy_service` | DESCRIBE, READ_ONLINE, READ_OFFLINE |
+
+> **Why does `collection_officer` need Entity DESCRIBE?**
+> When Feast resolves a FeatureService for `get_online_features`, it internally
+> checks DESCRIBE permission on the Entity type. Without this permission, even
+> allowed FeatureService calls fail with a permission error on `Entity/__dummy`.
+
+### How to Add a New User and Role
+
+Adding a new role (e.g., `risk_analyst`) requires changes in two files:
+
+#### 1. `keycloak/realm-export.json`
+
+Add the role:
+```json
+{
+  "name": "risk_analyst",
+  "description": "Read both feature views — no write access",
+  "composite": false,
+  "clientRole": true
+}
+```
+
+Add the user:
+```json
+{
+  "username": "charlie",
+  "email": "charlie@feast.internal",
+  "firstName": "Charlie",
+  "lastName": "Analyst",
+  "enabled": true,
+  "emailVerified": true,
+  "requiredActions": [],
+  "credentials": [{"type": "password", "value": "password123", "temporary": false}],
+  "clientRoles": {
+    "feast-app": ["risk_analyst"]
+  }
+}
+```
+
+> **Why include email, firstName, lastName, and `emailVerified: true`?**
+> Keycloak 26 enables `VERIFY_PROFILE` by default. Users without a complete
+> profile are blocked from logging in with error `Account is not fully set up`.
+
+#### 2. `feature_repo/feature_definitions.py`
+
+```python
+risk_analyst_permission = Permission(
+    name="risk-analyst-read-all",
+    policy=RoleBasedPolicy(roles=["risk_analyst"]),
+    types=[FeatureView, Entity, FeatureService],
+    actions=[AuthzedAction.DESCRIBE, *READ],
+)
+```
+
+#### 3. Deploy
+
+**Fresh deployment** (Keycloak has never started):
+```bash
+FEAST_HOSTNAME=your.hostname.com docker compose up --build
+```
+
+**Existing deployment** (Keycloak already imported the realm — `realm-export.json` is ignored on restart):
+- Use the Keycloak Admin UI at `https://your.hostname.com/realms/master` (admin / admin)
+  → Clients → `feast-app` → Roles → add role
+  → Users → add user → Role Mappings → assign client role
+- Then rebuild to re-run `feast apply`:
+  ```bash
+  FEAST_HOSTNAME=your.hostname.com docker compose up --build
+  ```
+
+### Verifying the JWT Manually
+
+To debug a 403, decode the token at [jwt.io](https://jwt.io). First fetch it:
 
 ```bash
-ls -la ~/.feast/ca.crt           # must exist
-openssl x509 -noout -text -in ~/.feast/ca.crt | grep "Subject\|DNS\|IP"
-# DNS name must match the hostname you put in feature_store.yaml
-```
-
----
-
-### `Failed to parse port in name`
-
-```
-errors resolving https://hostname: Failed to parse port in name
-```
-
-**Fix:** the registry `path` must include the port explicitly. Use
-`hostname:443`, not `https://hostname`.
-
----
-
-### `Method Not Allowed` on online serving
-
-```
-Error_code=405, error_message={"detail":"Method Not Allowed"}
-```
-
-**Fix:** nginx is not routing `/get-online-features` to `feast-online`.
-Restart nginx to reload the config:
-
-```bash
-docker compose restart nginx
-```
-
----
-
-### `scheme` validation error
-
-```
-Input should be 'http' or 'https' [type=literal_error, input_value='grpc+tls']
-```
-
-**Fix:** this version of Feast only accepts `http` or `https` for the offline
-store scheme. Use `scheme: https` (not `grpc+tls`).
-
----
-
-### Container `feast-nginx` restarting
-
-```bash
-docker logs feast-nginx
-```
-
-Common causes:
-- `certs/` is empty — run `bash scripts/gen_certs.sh <hostname>` first
-- nginx config syntax error — run `docker exec feast-nginx nginx -t`
-
----
-
-### All services healthy but client can't connect
-
-Check that ports 80 and 443 are open in your EC2 Security Group (Part 1 Step 1).
-
-```bash
-# From your LOCAL machine (not the server)
-curl -k https://ec2-108-137-101-226.ap-southeast-3.compute.amazonaws.com/
-```
-
-If this times out, the security group is blocking the connection.
-
----
-
-### `401 Unauthenticated` on every request
-
-The Feast servers now require a JWT token. Use the alice/bob client configs
-with `test_rbac.py` instead of `test_client.py`. Verify the token can be
-fetched manually:
-
-```bash
-curl -s -X POST \
+curl -s -k -X POST \
   https://your.hostname.com/realms/feast-realm/protocol/openid-connect/token \
-  -k \
-  -d "client_id=feast-app" \
-  -d "client_secret=feast-secret" \
-  -d "username=alice" \
-  -d "password=password123" \
-  -d "grant_type=password" | python -m json.tool | grep access_token
+  -d "client_id=feast-app&client_secret=feast-secret&username=alice&password=password123&grant_type=password" \
+  | python -m json.tool | grep access_token
 ```
 
----
-
-### `403 Permission Denied` (unexpected for alice)
-
-Alice should have full access. If she's blocked, the role name in Keycloak
-doesn't match `RoleBasedPolicy(roles=["admin"])`. Decode the JWT at
-[jwt.io](https://jwt.io) and check that `resource_access.feast-app.roles`
-contains `"admin"` (case-sensitive, client role — not realm role).
-
----
-
-### Feast servers waiting indefinitely for Keycloak
-
-Keycloak takes ~60 seconds to import the realm on first run. Check progress:
-
-```bash
-docker compose logs feast-keycloak --follow
-# Wait for: "Added user 'alice' to '/feast-realm'"
-# Then: feast-registry/offline/online will start automatically
+Paste the token at jwt.io and check:
+```json
+"resource_access": {
+  "feast-app": {
+    "roles": ["admin"]   ← must match RoleBasedPolicy exactly
+  }
+}
 ```
 
 ---
 
 ## Feature Reference
 
-Two feature views are registered:
+### Entity
+
+| Name | Type | Description |
+|---|---|---|
+| `customer_id` | int64 | Multifinance company customer identifier |
 
 ### `customer_credit_stats`
-Tags: `model: npf_prediction`, `team: credit_risk`
 
-| Feature                    | Type    |
-|----------------------------|---------|
-| `missed_payments_count`    | Int64   |
-| `days_past_due`            | Int64   |
-| `outstanding_balance`      | Float32 |
-| `credit_utilization_ratio` | Float32 |
-| `debt_service_ratio`       | Float32 |
-| `loan_to_value_ratio`      | Float32 |
-| `npf_flag`                 | Int64   |
+Tags: `team: credit_risk`, `model: npf_prediction`
+
+| Feature | Type | Description |
+|---|---|---|
+| `missed_payments_count` | Int64 | Number of missed payment installments |
+| `days_past_due` | Int64 | Maximum days past due on any obligation |
+| `outstanding_balance` | Float32 | Total outstanding loan balance (IDR) |
+| `credit_utilization_ratio` | Float32 | Used credit / available credit (0–1) |
+| `debt_service_ratio` | Float32 | Monthly payment / estimated income (0–2) |
+| `loan_to_value_ratio` | Float32 | Outstanding / original loan amount (0–1.2) |
+| `npf_flag` | Int64 | 1 = non-performing finance (target label) |
 
 ### `customer_behavior_stats`
-Tags: `model: collection_strategy`, `team: credit_risk`
 
-| Feature                      | Type    |
-|------------------------------|---------|
-| `avg_monthly_payment`        | Float32 |
-| `payment_consistency_score`  | Float32 |
-| `tenor_remaining_months`     | Int64   |
-| `contract_age_months`        | Int64   |
-| `early_payment_ratio`        | Float32 |
-| `payment_trend_3m`           | Float32 |
+Tags: `team: credit_risk`, `model: collection_strategy`
+
+| Feature | Type | Description |
+|---|---|---|
+| `avg_monthly_payment` | Float32 | Average monthly payment amount (IDR) |
+| `payment_consistency_score` | Float32 | Regularity of on-time payments (0–1) |
+| `tenor_remaining_months` | Int64 | Months remaining on the loan contract |
+| `contract_age_months` | Int64 | Months since loan was originated |
+| `early_payment_ratio` | Float32 | Fraction of months paid before due date (0–1) |
+| `payment_trend_3m` | Float32 | 3-month payment trend (positive = improving) |
+
+### Feature Services
+
+| Service | Views | Features | Access |
+|---|---|---|---|
+| `npf_prediction_service` | credit (all) + behavior (2) | npf_flag, missed_payments_count, days_past_due, outstanding_balance, credit_utilization_ratio, debt_service_ratio, loan_to_value_ratio, payment_trend_3m, early_payment_ratio | `admin` only |
+| `collection_strategy_service` | behavior (all) | avg_monthly_payment, payment_consistency_score, tenor_remaining_months, contract_age_months, early_payment_ratio, payment_trend_3m | `admin` + `collection_officer` |
+
+---
+
+## Troubleshooting
+
+### `401 Unauthenticated` on every request
+
+`test_client.py` requires alice's OIDC config. Run the `envsubst` setup step first:
+```bash
+export FEAST_SERVER_HOST=your.hostname.com
+export FEAST_CERT_PATH=/home/ubuntu/feast-poc-v3/certs/ca.crt
+envsubst < client/feature_store_alice.yaml > /tmp/fs_alice.yaml
+```
+If still failing, verify `docker compose logs feast-keycloak` shows the realm was imported successfully.
+
+To verify a token can be fetched:
+```bash
+curl -s -k -X POST \
+  https://your.hostname.com/realms/feast-realm/protocol/openid-connect/token \
+  -d "client_id=feast-app&client_secret=feast-secret&username=alice&password=password123&grant_type=password" \
+  | python -m json.tool | grep -E "access_token|error"
+```
+
+---
+
+### `Account is not fully set up` (Keycloak 26)
+
+Keycloak 26 enables `VERIFY_PROFILE` by default. Users without email, firstName,
+and lastName in their profile cannot log in via the password grant.
+
+**Immediate fix** (existing deployment):
+```bash
+docker exec feast-keycloak /opt/keycloak/bin/kcadm.sh config credentials \
+  --server http://localhost:8080 --realm master --user admin --password admin
+
+docker exec feast-keycloak /opt/keycloak/bin/kcadm.sh update \
+  authentication/required-actions/VERIFY_PROFILE -r feast-realm -s enabled=false
+```
+
+**Permanent fix** (in `realm-export.json`): ensure every user has `email`, `firstName`,
+`lastName`, and `"emailVerified": true` set (see the existing alice/bob entries as a template).
+
+---
+
+### `RS256 requires 'cryptography' to be installed`
+
+The `cryptography` Python package is missing from the Feast Docker image.
+The Feast OIDC token parser needs it to verify RS256-signed JWTs from Keycloak.
+
+**Fix:** ensure `"cryptography"` is in the pip install list in `Dockerfile.feast`, then:
+```bash
+FEAST_HOSTNAME=your.hostname.com docker compose up --build
+```
+
+---
+
+### `Hostname Verification Check failed` (gRPC TLS)
+
+The TLS certificate doesn't cover the hostname being used to connect. Common causes:
+
+- **Old cert**: you moved to a new EC2 instance but didn't regenerate the cert
+- **Private IP resolution**: from inside EC2, the public hostname resolves to the
+  private IP — the cert must cover the hostname (not the IP) for TLS to pass
+
+**Fix:** regenerate the cert for the current hostname:
+```bash
+bash scripts/gen_certs.sh your.hostname.com
+docker restart feast-nginx
+```
+
+---
+
+### `Error in service handler!` (gRPC server side)
+
+A gRPC call reached the server but failed inside the handler. Check:
+```bash
+docker compose logs feast-registry --tail 30
+docker compose logs feast-online --tail 30
+```
+
+Common causes:
+- Missing `cryptography` package (see above)
+- Entity permission missing (see below)
+
+---
+
+### `No permissions defined to manage DESCRIBE on Entity/__dummy`
+
+Feast checks `DESCRIBE` permission on `Entity` type when resolving a FeatureService
+for `get_online_features`. If no permission covers `Entity`, the call fails even
+for users who have `READ_ONLINE` on all required FeatureViews.
+
+**Fix:** add `Entity` to the permission types in `feature_definitions.py`, then re-apply:
+```python
+# In admin_permission — add Entity to types
+types=[FeatureView, Entity],
+
+# For collection_officer — add a separate entity DESCRIBE permission
+co_entity_permission = Permission(
+    name="co-entity-describe",
+    policy=RoleBasedPolicy(roles=["collection_officer"]),
+    types=[Entity],
+    actions=[AuthzedAction.DESCRIBE],
+)
+```
+Then run `feast apply` (via `docker compose up --build`).
+
+---
+
+### nginx crash-loops on startup (`host not found in upstream`)
+
+nginx resolves `upstream { server hostname:port; }` at startup. If a Feast server
+container doesn't exist yet, nginx fails and keeps restarting.
+
+**Fix:** restart nginx after all feast servers are running:
+```bash
+docker restart feast-nginx
+```
+
+To avoid this on future restarts, ensure the startup order in `docker-compose.yml`
+is correct (`nginx depends_on` all feast services).
+
+---
+
+### `Failed to parse port in name`
+
+The registry `path` in `feature_store.yaml` has the `https://` prefix:
+```yaml
+# Wrong
+path: https://hostname:443
+
+# Correct
+path: hostname:443
+```
+
+---
+
+### `403 Permission Denied` (unexpected for allowed user)
+
+1. Decode the JWT at [jwt.io](https://jwt.io) and check `resource_access.feast-app.roles`
+2. Verify the role name matches `RoleBasedPolicy` exactly (case-sensitive)
+3. Check that the Permission object covers the right `types` (FeatureView vs FeatureService vs Entity)
+4. Ensure `feast apply` ran after the Permission was added — permissions are stored in PostgreSQL
+
+---
+
+### Keycloak healthcheck never passing
+
+Keycloak 26.2 (RHEL 9) does not include `curl` or `wget`. The healthcheck in
+`docker-compose.yml` uses `bash /dev/tcp` to check if port 8080 is open:
+
+```yaml
+test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' 2>/dev/null"]
+```
+
+If you see `feast-keycloak` stuck in `health: starting` for more than 2 minutes,
+check the logs:
+```bash
+docker compose logs feast-keycloak | tail -20
+```
+
+---
+
+### feast-init stuck or failing
+
+```bash
+docker compose logs feast-init
+```
+
+Common causes:
+- `postgres` or `redis` not healthy yet → wait and retry
+- `generate_data.py` error → usually a missing dependency in the Docker image
+- `feast apply` failure → syntax error in `feature_definitions.py`
+
+The three servers only start after `feast-init` exits with code 0.

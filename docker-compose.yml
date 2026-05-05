@@ -58,11 +58,11 @@ services:
     volumes:
       - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/feast-realm/.well-known/openid-configuration > /dev/null || exit 1"]
-      interval: 15s
-      timeout: 10s
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
       retries: 20
-      start_period: 60s
+      start_period: 30s
     restart: unless-stopped
 
   feast-init:

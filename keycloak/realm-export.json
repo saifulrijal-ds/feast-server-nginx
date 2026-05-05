@@ -42,8 +42,12 @@
   "users": [
     {
       "username": "alice",
+      "email": "alice@feast.internal",
+      "firstName": "Alice",
+      "lastName": "Admin",
       "enabled": true,
-      "emailVerified": false,
+      "emailVerified": true,
+      "requiredActions": [],
       "credentials": [
         {
           "type": "password",
@@ -57,8 +61,12 @@
     },
     {
       "username": "bob",
+      "email": "bob@feast.internal",
+      "firstName": "Bob",
+      "lastName": "Officer",
       "enabled": true,
-      "emailVerified": false,
+      "emailVerified": true,
+      "requiredActions": [],
       "credentials": [
         {
           "type": "password",

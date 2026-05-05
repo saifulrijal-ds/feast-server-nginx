@@ -1,7 +1,7 @@
 """
 Feast RBAC Test — Keycloak OIDC
 Demonstrates role-based access control between two users:
-  alice (admin)            → full access to both feature views
+  alice (admin)            → full access to both feature views and feature services
   bob (collection_officer) → read-only on customer_behavior_stats only
 
 Setup (run once):
@@ -11,7 +11,7 @@ Setup (run once):
   envsubst < feature_store_bob.yaml   > /tmp/fs_bob.yaml
 
 Run:
-  python test_rbac.py
+  uv run python test_rbac.py
 
 NOTE: After adding auth, test_client.py will return 401 — use this file instead.
 """
@@ -24,6 +24,15 @@ BOB_YAML   = "/tmp/fs_bob.yaml"
 
 CREDIT_FV   = "customer_credit_stats"
 BEHAVIOR_FV = "customer_behavior_stats"
+
+NPF_SERVICE        = "npf_prediction_service"
+COLLECTION_SERVICE = "collection_strategy_service"
+
+ENTITY_ROWS = [
+    {"customer_id": 1001},
+    {"customer_id": 1002},
+    {"customer_id": 1003},
+]
 
 passed = 0
 failed = 0
@@ -74,9 +83,57 @@ def test_bob():
     check("bob DESCRIBE credit_stats",    False, lambda: store.get_feature_view(CREDIT_FV).name)
 
 
+def test_feature_services():
+    print()
+    print("=" * 60)
+    print(" TEST 3: FeatureService — get_online_features via service bundle")
+    print("=" * 60)
+
+    print("\n  alice (admin):")
+    store_alice = FeatureStore(fs_yaml_file=ALICE_YAML)
+
+    check(
+        "alice → npf_prediction_service (credit + behavior)",
+        True,
+        lambda: store_alice.get_online_features(
+            features=store_alice.get_feature_service(NPF_SERVICE),
+            entity_rows=ENTITY_ROWS,
+        ).to_dict(),
+    )
+    check(
+        "alice → collection_strategy_service (behavior only)",
+        True,
+        lambda: store_alice.get_online_features(
+            features=store_alice.get_feature_service(COLLECTION_SERVICE),
+            entity_rows=ENTITY_ROWS,
+        ).to_dict(),
+    )
+
+    print("\n  bob (collection_officer):")
+    store_bob = FeatureStore(fs_yaml_file=BOB_YAML)
+
+    check(
+        "bob → collection_strategy_service (behavior only) ✓ allowed",
+        True,
+        lambda: store_bob.get_online_features(
+            features=store_bob.get_feature_service(COLLECTION_SERVICE),
+            entity_rows=ENTITY_ROWS,
+        ).to_dict(),
+    )
+    check(
+        "bob → npf_prediction_service (contains credit stats) ✗ blocked",
+        False,
+        lambda: store_bob.get_online_features(
+            features=store_bob.get_feature_service(NPF_SERVICE),
+            entity_rows=ENTITY_ROWS,
+        ).to_dict(),
+    )
+
+
 if __name__ == "__main__":
     test_alice()
     test_bob()
+    test_feature_services()
 
     print()
     print("=" * 60)
